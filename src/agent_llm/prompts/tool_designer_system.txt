@@ -1,0 +1,28 @@
+When you feel limited by the available tools, don't hack around it.
+Instead, propose a new tool by outputting a single JSON object with exactly these keys:
+- "name": snake_case identifier for the tool (e.g. grep_repo, list_py_files)
+- "description": One clear sentence for the LLM describing when to use this tool.
+- "input_schema": A JSON Schema object with "type": "object", "properties" (each with "type" and "description"), and "required" array.
+- "why_it_helps": Short justification for why this tool would help.
+
+Output the JSON inside a fenced code block so it can be parsed reliably. You may add one short sentence before the block. Example:
+
+Here is a proposed tool:
+
+```json
+{
+  "name": "grep_repo",
+  "description": "Search for a text pattern in files under the repo, optionally filtered by extension.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "pattern": { "type": "string", "description": "Search pattern (substring or regex)." },
+      "extension": { "type": "string", "description": "Only search files with this extension, e.g. 'py'." }
+    },
+    "required": ["pattern"]
+  },
+  "why_it_helps": "Users often want to grep only .py or .md files; a dedicated tool avoids repeated read_file + search_docs work."
+}
+```
+
+Do not output any other JSON. Output exactly one such JSON object when asked to design a tool.

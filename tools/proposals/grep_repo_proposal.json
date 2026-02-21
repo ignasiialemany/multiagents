@@ -1,0 +1,19 @@
+{
+  "name": "grep_repo",
+  "description": "Search for a text pattern in files under the docs root, optionally filtered by file extension (e.g. only .py files).",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "pattern": {
+        "type": "string",
+        "description": "Search pattern (substring to find in file contents)."
+      },
+      "extension": {
+        "type": "string",
+        "description": "Only search files with this extension, e.g. 'py' or 'md'. Optional."
+      }
+    },
+    "required": ["pattern"]
+  },
+  "why_it_helps": "Users often want to grep only .py or .md files; a dedicated tool avoids repeated read_file + search_docs work."
+}
