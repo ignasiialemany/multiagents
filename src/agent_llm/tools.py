@@ -184,3 +184,46 @@ def load_registry_tools(registry_path: str | Path) -> dict[str, Tool]:
             continue
         result[name] = _tool(name, description, parameters, execute_fn)
     return result
+
+
+def create_assignable_tools(docs_root: str | Path) -> dict[str, Tool]:
+    """Build a registry of tools that can be assigned dynamically (e.g. by a tool designer)."""
+    root = Path(docs_root).resolve()
+    if not root.is_dir():
+        raise ValueError(f"docs_root must be an existing directory: {root}")
+
+    def write_file(path: str, content: str) -> str:
+        p = _resolve_safe(root, path)
+        if p is None:
+            return "Error: path is outside the allowed directory."
+        if p.is_dir():
+            return "Error: path is a directory, not a file."
+        try:
+            # create parent directories if needed
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+            return f"Successfully wrote to {path}."
+        except OSError as e:
+            return f"Error writing file: {e}"
+
+    return {
+        "write_file": _tool(
+            "write_file",
+            "Write text content to a file at the given path (relative to the notes/docs root). Overwrites if exists.",
+            {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Relative path to the file under the notes/docs root.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The text content to write to the file.",
+                    }
+                },
+                "required": ["path", "content"],
+            },
+            write_file,
+        ),
+    }

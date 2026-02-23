@@ -1,0 +1,7 @@
+notes/
+*.json
+*.txt
+*.log
+*.pyc
+*.pyo
+src/agent_llm.egg-info/

@@ -5,6 +5,7 @@ Agent wrapper: takes llm_client and tools, exposes run(messages) with a tool-cal
 import json
 import logging
 from typing import Any
+from agent_llm.llm import OpenRouterLLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ def _to_openrouter_tools(tools: dict[str, Any]) -> list[dict[str, Any]]:
 class Agent:
     """Single agent that calls the LLM and executes tools until a final answer."""
 
-    def __init__(self, llm_client: Any, tools: dict[str, Any]):
+    def __init__(self, llm_client: OpenRouterLLMClient, tools: dict[str, Any]):
         """
         Args:
             llm_client: Object with complete(messages, tools) -> (content, tool_calls).
@@ -52,9 +53,11 @@ class Agent:
 
         while iteration < MAX_ITERATIONS:
             iteration += 1
+            #so is the LLM that receives message and tools
+            current_openrouter_tools = _to_openrouter_tools(self.tools) if self.tools else None
             content, tool_calls = self.llm_client.complete(
                 messages,
-                self._openrouter_tools if self._openrouter_tools else None,
+                current_openrouter_tools,
             )
 
             # Build assistant message (OpenRouter/OpenAI style)

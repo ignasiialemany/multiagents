@@ -48,7 +48,9 @@ class OpenRouterLLMClient:
         if tools:
             kwargs["tools"] = tools
 
+        #calls client chat
         response = self._client.chat.completions.create(**kwargs)
+        #response is the response from the LLM
         msg = response.choices[0].message
 
         content = (msg.content or "").strip()
