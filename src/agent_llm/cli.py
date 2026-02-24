@@ -6,7 +6,9 @@ Entry point for the ``agent-llm`` console script.
 Usage
 -----
     agent-llm init            # scaffold a new project in the current directory
-    agent-llm "your task"     # delegate to agent_llm._runner.main()
+    agent-llm "your task"     # batch mode — delegate to supervisor runner
+    agent-llm -i              # interactive REPL (generative agent)
+    agent-llm                 # no task → defaults to interactive mode
 """
 
 from __future__ import annotations

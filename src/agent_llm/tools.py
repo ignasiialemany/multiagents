@@ -241,3 +241,85 @@ def create_assignable_tools(docs_root: str | Path) -> dict[str, Tool]:
             write_file,
         ),
     }
+
+
+# ── Spawn-subagent tool ─────────────────────────────────────────────────────
+
+
+def create_spawn_tool(
+    agents: dict,
+    store,
+    display,
+    agent_registry: list[dict[str, str]],
+) -> Tool:
+    """
+    Create a tool that lets the interactive agent spawn a subagent to handle
+    a task synchronously, returning the subagent's final response.
+
+    Parameters
+    ----------
+    agents : dict[str, Agent]
+    store  : SessionStore
+    display: RunDisplay
+    agent_registry : list of agent info dicts
+    """
+    from agent_llm.agent import Agent
+
+    known = [a["agent_id"] for a in agent_registry]
+    agent_desc = "\n".join(
+        f"- {a['agent_id']}: {a['description']}" for a in agent_registry
+    )
+
+    def spawn_subagent(agent_id: str, task: str) -> str:
+        if agent_id not in known:
+            return f"Error: Unknown agent '{agent_id}'. Available: {', '.join(known)}"
+        agent = agents.get(agent_id)
+        if agent is None:
+            return f"Error: Agent '{agent_id}' not initialised."
+
+        messages = store.load(agent_id)
+        if not messages:
+            messages.append({
+                "role": "system",
+                "content": f"You are agent {agent_id}.",
+            })
+
+        display.agent_turn_start(agent_id, "interactive_agent", task)
+        messages.append({
+            "role": "user",
+            "content": f"[Task from interactive agent]: {task}",
+        })
+
+        try:
+            final_text, updated = agent.run(messages)
+        except Exception as exc:
+            display.agent_error(agent_id, str(exc))
+            return f"Error: subagent failed: {exc}"
+
+        store.save(agent_id, updated)
+        display.agent_turn_end(agent_id, final_text or "")
+        return final_text or "(no response from subagent)"
+
+    return _tool(
+        name="spawn_subagent",
+        description=(
+            "Spawn a subagent to handle a specific task. The subagent runs "
+            "synchronously and returns its response.\n"
+            f"Available agents:\n{agent_desc}"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "ID of the subagent to spawn.",
+                },
+                "task": {
+                    "type": "string",
+                    "description": "Task description for the subagent.",
+                },
+            },
+            "required": ["agent_id", "task"],
+        },
+        execute_fn=spawn_subagent,
+    )

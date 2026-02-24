@@ -316,3 +316,75 @@ class RunDisplay:
             f"[error]ERROR {escape(message)}[/error]",
             plain=f"ERROR {message}",
         )
+
+    # ── Interactive REPL display ─────────────────────────────────────────
+
+    def agent_response(self, text: str) -> None:
+        """Display the agent's conversational response."""
+        self._print(
+            f"[bold bright_white]agent>[/bold bright_white] {escape(text)}",
+            plain=f"agent> {text}",
+        )
+
+    def memory_display(self, entries: list[dict]) -> None:
+        """Display a list of memory entries in a compact table."""
+        if not entries:
+            self._print("[ts]  (no memories)[/ts]", plain="  (no memories)")
+            return
+        for e in entries:
+            kind_col = {"observation": "cyan", "reflection": "magenta", "plan": "yellow"}.get(
+                e.get("kind", ""), "white"
+            )
+            imp = e.get("importance", "?")
+            kind = e.get("kind", "?")
+            content = e.get("content", "")
+            snippet = self._trunc(content, 100)
+            self._print(
+                f"  [{kind_col}]{kind:>12s}[/{kind_col}] "
+                f"[ts](imp={imp})[/ts] {escape(snippet)}",
+                plain=f"  {kind:>12s} (imp={imp}) {snippet}",
+            )
+
+    def command_output(self, text: str) -> None:
+        """Display output of a slash command."""
+        self._print(
+            f"[ts]{escape(text)}[/ts]",
+            plain=text,
+        )
+
+    def slash_help(self) -> None:
+        """Print the help message for interactive slash commands."""
+        lines = [
+            "",
+            "[header]Slash commands:[/header]",
+            "  /memory [query]         Show recent memories or search by query",
+            "  /reflect                Force a reflection cycle",
+            "  /plan <goal>            Create a plan for the given goal",
+            "  /spawn <agent> <task>   Delegate a task to a subagent",
+            "  /agents                 List available subagents",
+            "  /clear                  Clear conversation context (memory persists)",
+            "  /save                   Save session now",
+            "  /help                   Show this help message",
+            "  /quit or /exit          Exit interactive mode",
+            "",
+        ]
+        plain_lines = [line.replace("[header]", "").replace("[/header]", "") for line in lines]
+        self._print("\n".join(lines), plain="\n".join(plain_lines))
+
+    def interactive_banner(self, agent_ids: list[str]) -> None:
+        """Print the welcome banner for interactive mode."""
+        agent_list = ", ".join(
+            f"[{self._agent_col(a)}]{escape(a)}[/{self._agent_col(a)}]"
+            for a in agent_ids
+        )
+        plain_list = ", ".join(agent_ids)
+        self._print(
+            f"\n[header]Interactive agent[/header]  [ts]{self._ts()}[/ts]\n"
+            f"Available subagents: {agent_list}\n"
+            f"Type [bold]/help[/bold] for commands, [bold]/quit[/bold] to exit.\n",
+            plain=(
+                f"\nInteractive agent  {self._ts()}\n"
+                f"Available subagents: {plain_list}\n"
+                f"Type /help for commands, /quit to exit.\n"
+            ),
+        )
