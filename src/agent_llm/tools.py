@@ -265,12 +265,13 @@ def create_spawn_tool(
     """
     from agent_llm.agent import Agent
 
-    known = [a["agent_id"] for a in agent_registry]
     agent_desc = "\n".join(
         f"- {a['agent_id']}: {a['description']}" for a in agent_registry
     )
 
     def spawn_subagent(agent_id: str, task: str) -> str:
+        # Compute live so newly created agents are always recognised.
+        known = [a["agent_id"] for a in agent_registry]
         if agent_id not in known:
             return f"Error: Unknown agent '{agent_id}'. Available: {', '.join(known)}"
         agent = agents.get(agent_id)
@@ -322,4 +323,79 @@ def create_spawn_tool(
             "required": ["agent_id", "task"],
         },
         execute_fn=spawn_subagent,
+    )
+
+
+# ── Meeting tool: subagents discuss a topic and produce a plan ───────────────
+
+
+def create_meeting_tool(
+    agent_registry: list[dict],
+    llm_client,
+    display,
+    run_meeting_fn,
+    meeting_dir=None,
+) -> Tool:
+    """
+    Create a tool that runs a meeting: subagents prepare, discuss, and produce a plan.
+    If meeting_dir is set, the transcript and plan are saved to a file there.
+
+    Parameters
+    ----------
+    agent_registry : list of agent info dicts
+    llm_client : LLM client (for run_meeting_fn)
+    display : RunDisplay (for run_meeting_fn)
+    run_meeting_fn : callable(..., meeting_dir=...) -> str
+    meeting_dir : optional path to save meeting files
+    """
+    from pathlib import Path
+
+    agent_desc = "\n".join(
+        f"- {a['agent_id']}: {a['description']}" for a in agent_registry
+    )
+    _meeting_dir = Path(meeting_dir) if meeting_dir else None
+
+    def create_meeting(
+        topic: str,
+        agent_ids: str,
+        max_rounds: int = 4,
+    ) -> str:
+        # Compute live so newly created agents are always recognised.
+        known = [a["agent_id"] for a in agent_registry]
+        ids = [x.strip() for x in agent_ids.split(",") if x.strip()]
+        for a_id in ids:
+            if a_id not in known:
+                return f"Error: unknown agent '{a_id}'. Available: {', '.join(known)}"
+        return run_meeting_fn(
+            topic, ids, agent_registry, llm_client, display, max_rounds,
+            meeting_dir=_meeting_dir,
+        )
+
+    return _tool(
+        name="create_meeting",
+        description=(
+            "Create a meeting where multiple subagents discuss a topic together. "
+            "They take turns speaking; after the discussion a summary/plan is produced. "
+            "Use this to have the team align on a plan before executing.\n"
+            f"Available agents:\n{agent_desc}"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "topic": {
+                    "type": "string",
+                    "description": "The topic or question for the meeting.",
+                },
+                "agent_ids": {
+                    "type": "string",
+                    "description": "Comma-separated list of agent IDs to include (e.g. architect,coder,reviewer).",
+                },
+                "max_rounds": {
+                    "type": "integer",
+                    "description": "Number of discussion rounds (default 4).",
+                },
+            },
+            "required": ["topic", "agent_ids"],
+        },
+        execute_fn=create_meeting,
     )

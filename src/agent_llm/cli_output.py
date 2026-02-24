@@ -360,6 +360,7 @@ class RunDisplay:
             "  /memory [query]         Show recent memories or search by query",
             "  /reflect                Force a reflection cycle",
             "  /plan <goal>            Create a plan for the given goal",
+            "  /meeting <topic>        Run a meeting: subagents discuss topic and produce a plan",
             "  /spawn <agent> <task>   Delegate a task to a subagent",
             "  /agents                 List available subagents",
             "  /clear                  Clear conversation context (memory persists)",
@@ -387,4 +388,41 @@ class RunDisplay:
                 f"Available subagents: {plain_list}\n"
                 f"Type /help for commands, /quit to exit.\n"
             ),
+        )
+
+    # ── Meeting display ─────────────────────────────────────────────────────
+
+    def meeting_start(self, topic: str, agent_ids: list[str]) -> None:
+        """Print meeting start banner."""
+        agents_str = ", ".join(agent_ids)
+        self._print(
+            f"\n[header]Meeting[/header]  [ts]{self._ts()}[/ts]\n"
+            f"Topic: {escape(topic)}\n"
+            f"Participants: {agents_str}\n",
+            plain=f"\nMeeting  {self._ts()}\nTopic: {topic}\nParticipants: {agents_str}\n",
+        )
+
+    def meeting_prep(self, agent_id: str, content: str) -> None:
+        """Print one agent's preparation (questions/points) before the meeting."""
+        tag = self._agent_tag(agent_id)
+        snippet = self._trunc(content, 200)
+        self._print(
+            f"  {tag} [in](prep)[/in] {escape(snippet)}",
+            plain=f"  {agent_id:>14s} (prep) {snippet}",
+        )
+
+    def meeting_turn(self, agent_id: str, content: str) -> None:
+        """Print one agent's contribution in the meeting."""
+        tag = self._agent_tag(agent_id)
+        snippet = self._trunc(content, 200)
+        self._print(
+            f"  {tag} [out]{escape(snippet)}[/out]",
+            plain=f"  {agent_id:>14s} {snippet}",
+        )
+
+    def meeting_end(self, summary: str) -> None:
+        """Print meeting summary/plan."""
+        self._print(
+            f"[header]Meeting summary[/header]\n[out]{escape(summary)}[/out]\n",
+            plain=f"Meeting summary\n{summary}\n",
         )

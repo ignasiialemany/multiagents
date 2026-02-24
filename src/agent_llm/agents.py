@@ -15,6 +15,15 @@ def load_agent_registry(registry_path: str | Path) -> list[dict[str, str]]:
         return json.load(f)
 
 
+def save_agent_registry(registry: list[dict], path: str | Path) -> None:
+    """Persist the agent registry to disk (creates parent dirs as needed)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(registry, f, indent=2)
+        f.write("\n")
+
+
 def create_delegate_tool(
     bus,
     sender_agent_id: str,

@@ -37,15 +37,18 @@ from pathlib import Path
 from agent_llm.agent import Agent
 from agent_llm.llm import OpenRouterLLMClient
 from agent_llm.tools import (
+    _tool,
     create_default_tools,
     load_registry_tools,
     create_assignable_tools,
     create_spawn_tool,
+    create_meeting_tool,
 )
 from agent_llm.session import SessionStore
 from agent_llm.workspace import create_workspace_tools
 from agent_llm.agents import (
     load_agent_registry,
+    save_agent_registry,
     create_delegate_tool,
     create_assign_tool,
 )
@@ -217,6 +220,16 @@ Path resolution (--agents-registry / --tools-registry / --sessions-dir):
         ),
     )
     p.add_argument(
+        "--interactive-model",
+        default=None,
+        metavar="MODEL",
+        help=(
+            "OpenRouter model string to use for the interactive agent specifically.  "
+            "When set, a smarter/different model can power the interactive agent "
+            "while subagents still use --model.  Defaults to the value of --model."
+        ),
+    )
+    p.add_argument(
         "--reflection-threshold",
         type=int,
         default=50,
@@ -345,12 +358,14 @@ def _setup_infrastructure(args: argparse.Namespace, display: RunDisplay):
         "agents": agents,
         "agent_tools": agent_tools,
         "llm_client": llm_client,
+        "api_key": api_key,
         "default_tools": default_tools,
         "custom_tools": custom_tools,
         "workspace_tools": workspace_tools,
         "assignable_tools": assignable_tools,
         "sandbox_tool": sandbox_tool,
         "sessions_dir": sessions_dir,
+        "agents_registry_path": agents_registry_path,
     }
 
 
@@ -550,11 +565,27 @@ _INTERACTIVE_SYSTEM_PROMPT = """\
 You are an interactive generative agent. You perceive user messages, retrieve \
 relevant memories from your experience, and respond thoughtfully.
 
-You have access to tools for reading files, searching, and spawning subagents \
-to handle specialised tasks (coding, reviewing, etc.).
+You have access to tools for reading files, searching, spawning subagents, \
+and running multi-agent meetings.
 
 When the user asks you to do something complex, break it down and use \
 spawn_subagent to delegate parts to specialised agents.
+
+## Meeting requests
+When the user asks to run a meeting (e.g. "/meeting", "let's have a meeting", \
+"run a meeting about X"), do NOT immediately start the meeting. Instead:
+1. Ask clarifying questions: What is the goal/desired outcome? Which agents \
+should attend? Are there roles or expertise needed that don't exist yet?
+2. If the user wants a role or participant that is not in the agent registry, \
+use the create_agent tool to create them first.
+3. Once you have the topic, participant list, and any new agents created, \
+call create_meeting to run the meeting.
+
+## Creating agents
+Use the create_agent tool whenever a meeting (or task) requires a role that \
+doesn't exist yet. Provide a clear agent_id (lowercase, underscores, no spaces) \
+and a one-sentence description of the agent's expertise. The agent will be \
+persisted so it is available in future sessions.
 
 Be concise but helpful. You remember previous conversations through your \
 memory stream.\
@@ -596,6 +627,8 @@ def _handle_slash_command(
     agents: dict[str, Agent],
     store: SessionStore,
     reflection_threshold: int,
+    run_meeting_fn=None,
+    meeting_dir: Path | None = None,
 ) -> bool:
     """
     Handle a slash command. Returns True if the command was recognised.
@@ -677,6 +710,17 @@ def _handle_slash_command(
         display.command_output("Session saved.")
         return True
 
+    if command == "/meeting":
+        # /meeting is now handled by the interactive agent so it can ask
+        # clarifying questions and create missing agents first.
+        # This branch should not be reached in interactive mode (the REPL
+        # loop intercepts /meeting before calling here), but guard anyway.
+        display.command_output(
+            "Tip: /meeting is handled by the interactive agent — "
+            "it will ask about participants and goals before running."
+        )
+        return True
+
     display.command_output(f"Unknown command: {command}. Type /help for usage.")
     return True
 
@@ -718,14 +762,230 @@ def _run_subagent_sync(
     return final_text or "(no response)"
 
 
+# ── Meeting: subagents discuss a topic and produce a plan ───────────────────
+
+
+def run_meeting(
+    topic: str,
+    agent_ids: list[str],
+    agent_registry: list[dict],
+    llm_client: OpenRouterLLMClient,
+    display: RunDisplay,
+    max_rounds: int = 4,
+    meeting_dir: Path | None = None,
+) -> str:
+    """
+    Run a meeting: each subagent prepares 1-2 questions/points (persona + topic),
+    then they discuss in rounds. They can ask new questions and answer each other.
+    A plan is derived from the discussion. The full transcript and plan are
+    optionally saved to a file under meeting_dir.
+    """
+    if not agent_ids:
+        return "Error: no agents specified for the meeting."
+
+    id_to_desc = {a["agent_id"]: a.get("description", "") for a in agent_registry}
+    for a_id in agent_ids:
+        if a_id not in id_to_desc:
+            return f"Error: unknown agent '{a_id}' in meeting."
+
+    display.meeting_start(topic, agent_ids)
+
+    # ── Preparation: each agent reads persona and prepares 1-2 questions/points ──
+    prep_block = "Pre-meeting preparation (each participant's questions/points):\n\n"
+    for agent_id in agent_ids:
+        desc = id_to_desc.get(agent_id, "")
+        system = (
+            f"You are {agent_id}. Your role: {desc}\n\n"
+            "You are preparing for a meeting. You have read the topic and your role. "
+            "Prepare 1-2 questions or discussion points you want to raise in the meeting. "
+            "These can be clarified by other participants during the discussion."
+        )
+        user_content = (
+            f"Meeting topic: {topic}\n\n"
+            "List 1-2 questions or points you want to bring (one short paragraph or bullet points)."
+        )
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_content},
+        ]
+        try:
+            content, _ = llm_client.complete(messages, tools=None)
+        except Exception as exc:
+            content = f"(prep error: {exc})"
+        content = (content or "").strip()
+        prep_block += f"[{agent_id}]: {content}\n\n"
+        display.meeting_prep(agent_id, content)
+
+    transcript = f"Topic: {topic}\n\n{prep_block}\n--- Discussion ---\n\n"
+
+    # ── Discussion: round-table; agents can ask new questions and answer others ──
+    for r in range(max_rounds):
+        for agent_id in agent_ids:
+            desc = id_to_desc.get(agent_id, "")
+            system = (
+                f"You are {agent_id}. {desc}\n\n"
+                "You are in a meeting. You see the preparation and discussion so far. "
+                "You may: ask new questions for others to answer, answer questions others raised, "
+                "or add your view. Reply in 1-2 short paragraphs. Do not use tools; just speak."
+            )
+            user_content = (
+                f"Meeting topic: {topic}\n\n"
+                f"Preparation and discussion so far:\n\n{transcript}\n\n"
+                "What do you want to say? (e.g. a question for the group or an answer to someone's question.)"
+            )
+            messages = [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_content},
+            ]
+            try:
+                content, _ = llm_client.complete(messages, tools=None)
+            except Exception as exc:
+                content = f"(error: {exc})"
+            content = (content or "").strip()
+            transcript += f"[{agent_id}]: {content}\n\n"
+            display.meeting_turn(agent_id, content)
+
+    # ── Create plan from the meeting ──
+    plan_messages = [
+        {
+            "role": "user",
+            "content": (
+                "Based on this meeting (preparation and discussion), produce a clear plan. "
+                "Include: (1) agreed decisions or conclusions, (2) concrete next steps or action items, "
+                "(3) any open questions that still need to be answered. Use bullet points or numbered list.\n\n"
+                f"Meeting:\n{transcript}"
+            ),
+        },
+    ]
+    try:
+        plan, _ = llm_client.complete(plan_messages, tools=None)
+        plan = (plan or "").strip()
+    except Exception as exc:
+        plan = f"(plan failed: {exc})"
+    display.meeting_end(plan)
+
+    full_output = transcript + "\n--- Plan ---\n\n" + plan
+
+    # ── Save to file if meeting_dir is set ──
+    if meeting_dir is not None:
+        meeting_dir = Path(meeting_dir)
+        meeting_dir.mkdir(parents=True, exist_ok=True)
+        safe_topic = "".join(c if c.isalnum() or c in " -_" else "_" for c in topic)[:50]
+        timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
+        filename = f"meeting_{safe_topic.strip() or 'meeting'}_{timestamp}.md"
+        filepath = meeting_dir / filename
+        try:
+            filepath.write_text(full_output, encoding="utf-8")
+            display.command_output(f"Meeting saved to {filepath}")
+        except OSError as exc:
+            display.command_output(f"Could not save meeting file: {exc}")
+
+    return full_output
+
+
+def _make_create_agent_tool(
+    agent_registry: list[dict],
+    agents: dict,
+    agent_tools: dict,
+    infra: dict,
+    agents_registry_path: Path,
+) -> dict:
+    """
+    Build a 'create_agent' tool that adds a new agent to the live registry
+    and optionally persists it to disk.  Closes over the mutable dicts so
+    any updates are immediately visible to other tools (meetings, spawn, etc.).
+    """
+    import re
+
+    def create_agent(agent_id: str, description: str, persist: bool = True) -> str:
+        if not re.match(r"^[a-zA-Z][a-zA-Z0-9_]*$", agent_id):
+            return (
+                f"Error: agent_id '{agent_id}' is invalid. "
+                "Use only letters, digits, and underscores; must start with a letter."
+            )
+        if any(a["agent_id"] == agent_id for a in agent_registry):
+            existing = next(a for a in agent_registry if a["agent_id"] == agent_id)
+            return (
+                f"Agent '{agent_id}' already exists: {existing.get('description', '')}. "
+                "No changes made."
+            )
+
+        new_tools = {
+            **infra["default_tools"],
+            **infra["custom_tools"],
+            **infra["workspace_tools"],
+        }
+        delegate_tool = create_delegate_tool(
+            bus=None,
+            sender_agent_id=agent_id,
+            agent_registry=agent_registry,
+            task_store=infra["redis_state"],
+        )
+        new_tools[delegate_tool["name"]] = delegate_tool
+
+        new_entry: dict = {"agent_id": agent_id, "description": description}
+        agent_registry.append(new_entry)
+        agent_tools[agent_id] = new_tools
+        agents[agent_id] = Agent(infra["llm_client"], new_tools, agent_id=agent_id)
+
+        if persist:
+            save_agent_registry(agent_registry, agents_registry_path)
+            persist_note = " and saved to registry."
+        else:
+            persist_note = " (not persisted to disk)."
+
+        return f"Agent '{agent_id}' created: {description}{persist_note}"
+
+    return _tool(
+        name="create_agent",
+        description=(
+            "Create a new agent and add it to the registry so it can be used in "
+            "meetings or spawned for tasks. Use this when the user wants a meeting "
+            "participant or role that does not exist yet. "
+            "agent_id must be lowercase letters/digits/underscores (e.g. 'security_expert')."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "Unique identifier for the new agent (e.g. 'security_expert').",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "One-sentence description of the agent's role and expertise.",
+                },
+                "persist": {
+                    "type": "boolean",
+                    "description": "Whether to save the new agent to the agents registry file (default: true).",
+                },
+            },
+            "required": ["agent_id", "description"],
+        },
+        execute_fn=create_agent,
+    )
+
+
 def _run_interactive(args: argparse.Namespace, display: RunDisplay) -> None:
     """Interactive REPL with generative agent architecture."""
     infra = _setup_infrastructure(args, display)
     agents = infra["agents"]
+    agent_tools = infra["agent_tools"]
     store = infra["store"]
     agent_registry = infra["agent_registry"]
     llm_client = infra["llm_client"]
     sessions_dir = infra["sessions_dir"]
+    agents_registry_path = infra["agents_registry_path"]
+
+    # Optionally use a dedicated smarter model for the interactive agent.
+    interactive_model = getattr(args, "interactive_model", None)
+    if interactive_model:
+        interactive_llm_client = OpenRouterLLMClient(
+            api_key=infra["api_key"],
+            model=interactive_model,
+        )
+    else:
+        interactive_llm_client = llm_client
 
     # Set up the interactive agent's memory stream
     memory_path = Path(sessions_dir) / "interactive_agent.memory.jsonl"
@@ -741,9 +1001,19 @@ def _run_interactive(args: argparse.Namespace, display: RunDisplay) -> None:
     }
     spawn_tool = create_spawn_tool(agents, store, display, agent_registry)
     interactive_tools[spawn_tool["name"]] = spawn_tool
+    meeting_dir = Path(sessions_dir) / "meetings"
+    meeting_tool = create_meeting_tool(
+        agent_registry, llm_client, display, run_meeting, meeting_dir=meeting_dir
+    )
+    interactive_tools[meeting_tool["name"]] = meeting_tool
     interactive_tools[infra["sandbox_tool"]["name"]] = infra["sandbox_tool"]
 
-    interactive_agent = Agent(llm_client, interactive_tools, agent_id="interactive")
+    create_agent_tool = _make_create_agent_tool(
+        agent_registry, agents, agent_tools, infra, agents_registry_path
+    )
+    interactive_tools[create_agent_tool["name"]] = create_agent_tool
+
+    interactive_agent = Agent(interactive_llm_client, interactive_tools, agent_id="interactive")
 
     display.interactive_banner(
         agent_ids=[a["agent_id"] for a in agent_registry],
@@ -762,8 +1032,26 @@ def _run_interactive(args: argparse.Namespace, display: RunDisplay) -> None:
             if not user_input:
                 continue
 
+            # /meeting is routed through the interactive agent so it can ask
+            # clarifying questions and create missing agents before running.
+            if user_input.lower().startswith("/meeting"):
+                parts = user_input.split(maxsplit=1)
+                topic = parts[1].strip() if len(parts) > 1 else ""
+                topic_clause = f" Topic: {topic!r}." if topic else ""
+                known_ids = ", ".join(a["agent_id"] for a in agent_registry)
+                user_input = (
+                    f"I'd like to run a meeting.{topic_clause} "
+                    f"Currently registered agents: {known_ids}. "
+                    "Before running the meeting, ask me which agents should attend, "
+                    "what the goal/desired outcome is, and whether we need any new "
+                    "agents that don't exist yet. Once you have that information, "
+                    "create any missing agents with create_agent, then start the "
+                    "meeting with create_meeting."
+                )
+                # Fall through to the normal agent processing below.
+
             # Slash commands
-            if user_input.startswith("/"):
+            elif user_input.startswith("/"):
                 is_clear = user_input.strip().lower() == "/clear"
                 try:
                     _handle_slash_command(
@@ -775,6 +1063,8 @@ def _run_interactive(args: argparse.Namespace, display: RunDisplay) -> None:
                         agents,
                         store,
                         reflection_threshold,
+                        run_meeting_fn=run_meeting,
+                        meeting_dir=meeting_dir,
                     )
                 except _QuitInteractive:
                     break
