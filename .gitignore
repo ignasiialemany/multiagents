@@ -5,3 +5,6 @@ notes/
 *.pyc
 *.pyo
 src/agent_llm.egg-info/
+last_run.txt
+last_supervisor_run.txt
+.env
