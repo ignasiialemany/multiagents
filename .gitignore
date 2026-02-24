@@ -10,3 +10,4 @@ last_supervisor_run.txt
 .env
 .prose/
 *.prose
+*.txt
