@@ -24,20 +24,19 @@ Phase 2: Agent can propose new tools; human reviews, implements, and registers t
 
 ## Usage
 
-Run the Phase 1 test harness (happy-path and adversarial prompts) from the repo root:
+Run the optional unit tests (no API key needed): `pip install -e ".[dev]"` then `pytest tests/`.
+
+Run the multi-agent runner from the repo root:
 
 ```bash
-python scripts/run_phase1_tests.py
+python scripts/run_multi_agent.py
 ```
 
-Logs will show tool selection and arguments for each run. Optional unit tests (no API key needed): `pip install -e ".[dev]"` then `pytest tests/`.
+Logs will show each agent's tool calls and messages per round.
 
 **Phase 2 – Tool proposals (human-in-the-loop):**
 
-- **Design a tool**: `python scripts/design_tool.py "I keep asking to grep the repo for pattern X in .py files only"` — agent returns a JSON proposal; logged as "proposed" and written to `tools/proposals/<name>_proposal.json`.
-- **Register after implementing**: Implement the function in `src/agent_llm/tools_custom.py`, then `python scripts/register_tool.py tools/proposals/<name>_proposal.json` — adds to `tools/registry.json` and logs "implemented".
-- **Reject a proposal**: `python scripts/reject_tool.py <name> "reason"` — logs "rejected" in `tools/proposals_log.jsonl`.
-- **Run with registry**: `python scripts/run_with_registry.py [prompt]` — loads default tools plus `tools/registry.json`; with a prompt runs once, without runs Phase 1–style prompts.
+Tool proposals are managed directly. Implement the function in `src/agent_llm/tools_custom.py`, then add the entry to `tools/registry.json` — the tool will be available to all agents on the next run.
 
 See `tools/README.md` for registry and log format.
 
@@ -48,13 +47,8 @@ See `tools/README.md` for registry and log format.
   - `tools.py` – tool definitions + `load_registry_tools()`
   - `tools_custom.py` – custom tools (Phase 2)
   - `agent.py` – agent wrapper and tool-call loop
-  - `designer.py` – tool proposal parsing and designer prompt
   - `prompts/tool_designer_system.txt` – designer system prompt
 - `notes/` – default root for file tools (safe sandbox)
 - `tools/` – `registry.json`, `proposals_log.jsonl`, `proposals/` (Phase 2)
-- `scripts/run_phase1_tests.py` – Phase 1 test runner
-- `scripts/run_with_registry.py` – run agent with default + registry tools
-- `scripts/design_tool.py` – get a tool proposal from the agent
-- `scripts/register_tool.py` – add implemented tool to registry
-- `scripts/reject_tool.py` – log a rejected proposal
+- `scripts/run_multi_agent.py` – multi-agent runner
 - `tests/test_agent.py` – optional unit tests (mock LLM)

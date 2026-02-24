@@ -5,17 +5,21 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agent-llm"
 version = "0.1.0"
-description = "Single agent with custom tools (Phase 1)"
+description = "Redis-backed parallel multi-agent LLM runner"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "openai>=1.0.0",
+    "openai>=1.0.0,<2.0.0",
     "python-dotenv>=1.0.0",
+    "redis>=5.0.0",
+    "rich>=13.0.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
+    "pytest-mock>=3.0",
+    "fakeredis>=2.0",
 ]
 
 [tool.setuptools.packages.find]

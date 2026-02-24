@@ -10,8 +10,7 @@ When you run `scripts/run_multi_agent.py`, the following files are created or up
 
 | Path | Produced by | Description |
 |------|--------------|-------------|
-| **`sessions/{agent_id}.json`** | SessionStore | One JSON file per agent (e.g. `sessions/architect.json`, `sessions/coder.json`). Contains that agent’s full conversation history (system, user, assistant, tool messages). Created or updated after each agent turn. |
-| **`workspace.json`** | Workspace | Single JSON file at the repo root. Shared key–value state that agents read/update via `read_workspace` and `update_workspace`. Created on first write; updated whenever any agent calls `update_workspace`. |
+| **`sessions/{agent_id}.json`** | SessionStore | One JSON file per agent (e.g. `sessions/architect.json`, `sessions/coder.json`). Contains that agent's full conversation history (system, user, assistant, tool messages). Created or updated after each agent turn. |
 
 The **message bus** is in-memory only; it does not write any files. Inbox contents are consumed each round and only affect what gets appended to session files when agents run.
 
@@ -30,14 +29,8 @@ Each agent in the multi-agent run gets the **same** combined tool set:
 
 So: **default + registry + workspace + send_message** are all active in `run_multi_agent.py`.
 
-**Tool designer: is it still there?**  
-Yes. The tool designer flow is **unchanged** and **separate** from the multi-agent runner:
-
-1. **Design a tool:** `python scripts/design_tool.py "description of what you need"` — runs the agent with **no** tools and the designer system prompt; the agent proposes a tool (JSON); the proposal is written to `tools/proposals/` and logged in `tools/proposals_log.jsonl`.
-2. **Implement and register:** You implement the function (e.g. in `src/agent_llm/tools_custom.py`), then `python scripts/register_tool.py tools/proposals/<name>_proposal.json` — adds the tool to `tools/registry.json`.
-3. **Use in multi-agent (or single-agent):** Both `run_multi_agent.py` and `run_with_registry.py` call `load_registry_tools(tools/registry.json)`. So any tool you register is available to **all** agents in the multi-agent run.
-
-So the tool designer is still how you add new tools; the multi-agent runner simply uses whatever is in the registry (plus default, workspace, and delegate tools).
+**Adding new tools:**  
+Implement the function in `src/agent_llm/tools_custom.py` and add the entry to `tools/registry.json`. The `run_multi_agent.py` runner calls `load_registry_tools(tools/registry.json)`, so any registered tool is available to **all** agents in the multi-agent run.
 
 ---
 
@@ -71,15 +64,15 @@ So the tool designer is still how you add new tools; the multi-agent runner simp
 
 ## 3. Workspace (`Workspace`)
 
-**What it is:** A **shared, persistent key–value store** backed by a single JSON file (e.g. `workspace.json`). All agents can read and write it via tools.
+**What it is:** A **shared, persistent key–value store** backed by Redis. All agents can read and write it via tools.
 
 **How agents use it:**
-- Each agent gets **workspace tools**: `read_workspace` (see the whole JSON) and `update_workspace(key, value)` (set a key). When an agent calls these tools, the underlying `Workspace` instance loads/saves the same file.
-- Typical uses: shared task list, “current plan”, specs or results that multiple agents need to see or update.
+- Each agent gets **workspace tools**: `read_workspace` (see the whole state) and `update_workspace(key, value)` (set a key). When an agent calls these tools, the underlying `Workspace` instance reads/writes the shared Redis store.
+- Typical uses: shared task list, "current plan", specs or results that multiple agents need to see or update.
 
-**So:** The workspace is **shared, visible state** that agents use to coordinate and build together. Unlike the bus, it is not “who said what to whom” but “what is the current shared context/artifacts.” Unlike sessions, it is not private; every agent with workspace tools sees the same data.
+**So:** The workspace is **shared, visible state** that agents use to coordinate and build together. Unlike the bus, it is not "who said what to whom" but "what is the current shared context/artifacts." Unlike sessions, it is not private; every agent with workspace tools sees the same data.
 
-**In code:** `workspace = Workspace(_repo_root / "workspace.json")`; `create_workspace_tools(workspace)` gives each agent the same tools backed by that one `Workspace` instance.
+**In code:** `workspace = Workspace(redis_client)`; `create_workspace_tools(workspace)` gives each agent the same tools backed by that one `Workspace` instance.
 
 ---
 
