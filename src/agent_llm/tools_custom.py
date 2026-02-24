@@ -9,10 +9,6 @@ from pathlib import Path
 
 from agent_llm.tools import _resolve_safe
 
-# Default docs root (repo/notes), same as default tools
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-_DEFAULT_ROOT = _REPO_ROOT / "notes"
-
 
 def grep_repo(
     pattern: str,
@@ -27,7 +23,13 @@ def grep_repo(
     `path` is an alias for `root`; if both are supplied, `path` takes precedence.
     """
     effective_root = path if path is not None else root
-    base = Path(effective_root) if effective_root else _DEFAULT_ROOT
+    if effective_root is None:
+        return (
+            "Error: no search directory specified. "
+            "Pass a 'path' argument pointing to your project directory, "
+            "e.g. path='src/'."
+        )
+    base = Path(effective_root)
     if not base.exists() or not base.is_dir():
         return f"Error: root directory does not exist: {base}"
 

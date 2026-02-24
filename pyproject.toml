@@ -22,5 +22,8 @@ dev = [
     "fakeredis>=2.0",
 ]
 
+[project.scripts]
+agent-llm = "agent_llm.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
