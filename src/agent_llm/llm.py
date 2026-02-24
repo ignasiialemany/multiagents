@@ -19,7 +19,7 @@ class OpenRouterLLMClient:
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = "anthropic/claude-sonnet-4",
+        model: str = "minimax/minimax-m2.5",
         max_tokens: int = 4096,
     ):
         self._client = OpenAI(
@@ -48,9 +48,9 @@ class OpenRouterLLMClient:
         if tools:
             kwargs["tools"] = tools
 
-        #calls client chat
         response = self._client.chat.completions.create(**kwargs)
-        #response is the response from the LLM
+        if not response.choices:
+            return ("", [])
         msg = response.choices[0].message
 
         content = (msg.content or "").strip()
@@ -58,16 +58,18 @@ class OpenRouterLLMClient:
 
         if getattr(msg, "tool_calls", None):
             for tc in msg.tool_calls:
-                name = getattr(tc.function, "name", "") if hasattr(tc, "function") else ""
-                raw_args = getattr(tc.function, "arguments", None) if hasattr(tc, "function") else None
+                name = tc.function.name or ""
+                raw_args = tc.function.arguments
                 try:
                     inp = json.loads(raw_args) if raw_args else {}
                 except (json.JSONDecodeError, TypeError):
                     inp = {}
-                tool_calls.append({
-                    "id": getattr(tc, "id", ""),
-                    "name": name,
-                    "input": inp,
-                })
+                tool_calls.append(
+                    {
+                        "id": getattr(tc, "id", ""),
+                        "name": name,
+                        "input": inp,
+                    }
+                )
 
         return (content, tool_calls)

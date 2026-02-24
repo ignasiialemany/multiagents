@@ -1,7 +1,9 @@
 import json
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
+
 
 class SessionStore:
     """Stores and retrieves agent message histories by session_id."""
@@ -25,10 +27,19 @@ class SessionStore:
             return []
 
     def save(self, session_id: str, messages: list[dict[str, Any]]) -> None:
-        """Save messages for a given session."""
+        """Save messages for a given session (atomic write via temp file + rename)."""
         path = self._get_path(session_id)
-        with path.open("w", encoding="utf-8") as f:
-            json.dump(messages, f, indent=2)
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+        try:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                json.dump(messages, f, indent=2)
+            os.replace(tmp_path, path)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     def append(self, session_id: str, message: dict[str, Any]) -> None:
         """Append a single message to a session."""
@@ -38,6 +49,4 @@ class SessionStore:
 
     def get_all_sessions(self) -> list[str]:
         """Return a list of all session IDs."""
-        if not self.sessions_dir.exists():
-            return []
         return [p.stem for p in self.sessions_dir.glob("*.json")]

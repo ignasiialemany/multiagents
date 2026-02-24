@@ -1,17 +1,22 @@
 Metadata-Version: 2.4
 Name: agent-llm
 Version: 0.1.0
-Summary: Single agent with custom tools (Phase 1)
+Summary: Redis-backed parallel multi-agent LLM runner
 Requires-Python: >=3.10
 Description-Content-Type: text/markdown
-Requires-Dist: openai>=1.0.0
+Requires-Dist: openai<2.0.0,>=1.0.0
 Requires-Dist: python-dotenv>=1.0.0
+Requires-Dist: redis>=5.0.0
+Requires-Dist: rich>=13.0.0
 Provides-Extra: dev
 Requires-Dist: pytest>=7.0; extra == "dev"
+Requires-Dist: pytest-mock>=3.0; extra == "dev"
+Requires-Dist: fakeredis>=2.0; extra == "dev"
 
 # agent-llm
 
-Phase 1: Single agent that can reliably call a small set of custom tools.
+Phase 1: Single agent that can reliably call a small set of custom tools.  
+Phase 2: Agent can propose new tools; human reviews, implements, and registers them.
 
 ## Setup
 
@@ -34,20 +39,31 @@ Phase 1: Single agent that can reliably call a small set of custom tools.
 
 ## Usage
 
-Run the Phase 1 test harness (happy-path and adversarial prompts) from the repo root:
+Run the optional unit tests (no API key needed): `pip install -e ".[dev]"` then `pytest tests/`.
+
+Run the multi-agent runner from the repo root:
 
 ```bash
-python scripts/run_phase1_tests.py
+python scripts/run_multi_agent.py
 ```
 
-Logs will show tool selection and arguments for each run. Optional unit tests (no API key needed): `pip install -e ".[dev]"` then `pytest tests/`.
+Logs will show each agent's tool calls and messages per round.
+
+**Phase 2 – Tool proposals (human-in-the-loop):**
+
+Tool proposals are managed directly. Implement the function in `src/agent_llm/tools_custom.py`, then add the entry to `tools/registry.json` — the tool will be available to all agents on the next run.
+
+See `tools/README.md` for registry and log format.
 
 ## Project layout
 
 - `src/agent_llm/` – agent package
   - `llm.py` – OpenRouter client wrapper (OpenAI-compatible API)
-  - `tools.py` – tool definitions (list_files, read_file, search_docs)
+  - `tools.py` – tool definitions + `load_registry_tools()`
+  - `tools_custom.py` – custom tools (Phase 2)
   - `agent.py` – agent wrapper and tool-call loop
+  - `prompts/tool_designer_system.txt` – designer system prompt
 - `notes/` – default root for file tools (safe sandbox)
-- `scripts/run_phase1_tests.py` – manual test runner
+- `tools/` – `registry.json`, `proposals_log.jsonl`, `proposals/` (Phase 2)
+- `scripts/run_multi_agent.py` – multi-agent runner
 - `tests/test_agent.py` – optional unit tests (mock LLM)

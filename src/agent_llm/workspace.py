@@ -1,8 +1,14 @@
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from agent_llm.tools import _tool, Tool
+
+class WorkspaceLike(Protocol):
+    def read_all(self) -> Any:
+        ...
+    def write_key(self, key: str, value: Any) -> Any:
+        ...
 
 class Workspace:
     """
@@ -45,15 +51,19 @@ class Workspace:
         self._save(data)
         return "Task appended to workspace."
 
-def create_workspace_tools(workspace: Workspace) -> dict[str, Tool]:
+def create_workspace_tools(workspace: WorkspaceLike) -> dict[str, Tool]:
     """Return dictionary of tools to interact with the workspace."""
     
     def read_workspace() -> str:
-        return workspace.read_all()
+        data = workspace.read_all()
+        if isinstance(data, str):
+            return data
+        return json.dumps(data, indent=2)
 
     def update_workspace(key: str, value: str) -> str:
         # Simple string for value, though could be json-parsed
-        return workspace.write_key(key, value)
+        result = workspace.write_key(key, value)
+        return str(result) if result is not None else f"Successfully updated workspace key '{key}'."
 
     return {
         "read_workspace": _tool(

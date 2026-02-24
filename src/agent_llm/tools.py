@@ -6,9 +6,12 @@ Registry loading for Phase 2 custom tools.
 
 import importlib
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 # Tool representation: name, description, JSON Schema parameters, execute callable
 Tool = dict[str, Any]  # name, description, parameters, execute
@@ -19,9 +22,8 @@ def _resolve_safe(root: Path, path_str: str) -> Path | None:
     try:
         path_str = path_str.strip() or "."
         resolved = (root / path_str).resolve()
-        resolved = resolved.resolve()
         root_resolved = root.resolve()
-        if not str(resolved).startswith(str(root_resolved)):
+        if not resolved.is_relative_to(root_resolved):
             return None
         return resolved
     except Exception:
@@ -175,12 +177,24 @@ def load_registry_tools(registry_path: str | Path) -> dict[str, Tool]:
         function_name = entry.get("function")
         description = entry.get("description", "")
         parameters = entry.get("parameters")
-        if not name or not module_name or not function_name or not isinstance(parameters, dict):
+        if (
+            not name
+            or not module_name
+            or not function_name
+            or not isinstance(parameters, dict)
+        ):
             continue
         try:
             mod = importlib.import_module(module_name)
             execute_fn = getattr(mod, function_name)
-        except (ImportError, AttributeError):
+        except (ImportError, AttributeError) as exc:
+            logger.warning(
+                "load_registry_tools: skipping tool %r — could not load %s.%s: %s",
+                name,
+                module_name,
+                function_name,
+                exc,
+            )
             continue
         result[name] = _tool(name, description, parameters, execute_fn)
     return result
@@ -220,7 +234,7 @@ def create_assignable_tools(docs_root: str | Path) -> dict[str, Tool]:
                     "content": {
                         "type": "string",
                         "description": "The text content to write to the file.",
-                    }
+                    },
                 },
                 "required": ["path", "content"],
             },
