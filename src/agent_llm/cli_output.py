@@ -403,21 +403,19 @@ class RunDisplay:
         )
 
     def meeting_prep(self, agent_id: str, content: str) -> None:
-        """Print one agent's preparation (questions/points) before the meeting."""
+        """Print one agent's preparation (questions/points) before the meeting. Full content, no truncation."""
         tag = self._agent_tag(agent_id)
-        snippet = self._trunc(content, 200)
         self._print(
-            f"  {tag} [in](prep)[/in] {escape(snippet)}",
-            plain=f"  {agent_id:>14s} (prep) {snippet}",
+            f"  {tag} [in](prep)[/in]\n[out]{escape(content)}[/out]",
+            plain=f"  {agent_id:>14s} (prep)\n{content}",
         )
 
     def meeting_turn(self, agent_id: str, content: str) -> None:
-        """Print one agent's contribution in the meeting."""
+        """Print one agent's contribution in the meeting. Full content, no truncation."""
         tag = self._agent_tag(agent_id)
-        snippet = self._trunc(content, 200)
         self._print(
-            f"  {tag} [out]{escape(snippet)}[/out]",
-            plain=f"  {agent_id:>14s} {snippet}",
+            f"  {tag} [out]\n{escape(content)}[/out]",
+            plain=f"  {agent_id:>14s}\n{content}",
         )
 
     def meeting_end(self, summary: str) -> None:

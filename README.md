@@ -2,6 +2,12 @@
 
 A Redis-backed parallel multi-agent runner with supervisor orchestration. Agents can read/write files, run sandboxed code, and delegate to sub-agents.
 
+## Interactive vs Batch Mode
+
+`agent-llm` supports two operational modes:
+- **Interactive Mode**: An interactive REPL where you converse with a single generative agent that maintains a memory stream, reflects, plans, and can spawn subagents. (Default when no task is provided). For a full description, see [docs/interactive_mode.md](docs/interactive_mode.md).
+- **Batch Mode**: A one-shot task execution where the supervisor distributes work among agents until the task is complete.
+
 ## Two Modes
 
 ### Standalone (this repo)
@@ -90,6 +96,20 @@ Logs will show each agent's tool calls and messages per round.
 Tool proposals are managed directly. Implement the function in `src/agent_llm/tools_custom.py`, then add the entry to `tools/registry.json` — the tool will be available to all agents on the next run.
 
 See `tools/README.md` for registry and log format.
+
+## Web UI
+
+You can interact with the agent through a minimal web interface:
+
+```bash
+# Ensure optional web dependencies are installed
+pip install -e ".[web]"
+
+# Run the web server
+python -m agent_llm.serve_web
+```
+
+Then open http://127.0.0.1:5000 in your browser to chat with the interactive agent.
 
 ---
 

@@ -21,6 +21,9 @@ dev = [
     "pytest-mock>=3.0",
     "fakeredis>=2.0",
 ]
+web = [
+    "flask>=3.0.0",
+]
 
 [project.scripts]
 agent-llm = "agent_llm.cli:main"

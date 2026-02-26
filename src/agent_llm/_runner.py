@@ -1196,6 +1196,59 @@ def _make_create_agent_tool(
     )
 
 
+def run_interactive_turn(
+    user_input: str,
+    conversation: list[dict],
+    memory: MemoryStream,
+    interactive_agent: Agent,
+    llm_client: OpenRouterLLMClient,
+    display: RunDisplay,
+    reflection_threshold: int = 50,
+) -> tuple[str | None, list[dict]]:
+    """
+    Run a single turn of the interactive generative agent.
+    Perceives input, retrieves memory, runs agent, stores result, and may reflect.
+    Returns (response_text, updated_messages).
+    """
+    # 1. Perceive — store user message in memory stream
+    importance = llm_client.score_importance(user_input)
+    memory.add(user_input, kind="observation", importance=importance)
+
+    # 2. Retrieve — find relevant memories
+    relevant = memory.retrieve(user_input, k=10)
+
+    # 3. Build context and respond
+    conversation.append({"role": "user", "content": user_input})
+    context = _build_context_messages(
+        _INTERACTIVE_SYSTEM_PROMPT, relevant, conversation,
+    )
+    response_text, updated = interactive_agent.run(context)
+
+    # Keep only the new messages added during this turn
+    if response_text:
+        conversation.append({"role": "assistant", "content": response_text})
+
+    # Emit tool events from this turn
+    for tool_name, t_args, result, is_error in _extract_tool_events(updated):
+        display.tool_call("interactive", tool_name, t_args, result, error=is_error)
+
+    # 4. Store response in memory
+    if response_text:
+        resp_importance = llm_client.score_importance(response_text)
+        memory.add(response_text, kind="observation", importance=resp_importance)
+
+    # 5. Maybe reflect
+    reflections = maybe_reflect(memory, llm_client, threshold=reflection_threshold)
+    if reflections:
+        for r in reflections:
+            display.command_output(f"  [reflection] {r}")
+
+    # 6. Display response
+    display.agent_response(response_text or "(no response)")
+    
+    return response_text, updated
+
+
 def _run_interactive(args: argparse.Namespace, display: RunDisplay) -> None:
     """Interactive REPL with generative agent architecture."""
     infra = _setup_infrastructure(args, display)
@@ -1307,42 +1360,16 @@ def _run_interactive(args: argparse.Namespace, display: RunDisplay) -> None:
                     conversation.clear()
                 continue
 
-            # 1. Perceive — store user message in memory stream
-            importance = llm_client.score_importance(user_input)
-            memory.add(user_input, kind="observation", importance=importance)
-
-            # 2. Retrieve — find relevant memories
-            relevant = memory.retrieve(user_input, k=10)
-
-            # 3. Build context and respond
-            conversation.append({"role": "user", "content": user_input})
-            context = _build_context_messages(
-                _INTERACTIVE_SYSTEM_PROMPT, relevant, conversation,
+            # 1-6. Run the agent turn
+            run_interactive_turn(
+                user_input,
+                conversation,
+                memory,
+                interactive_agent,
+                llm_client,
+                display,
+                reflection_threshold,
             )
-            response_text, updated = interactive_agent.run(context)
-
-            # Keep only the new messages added during this turn
-            # (context already has the full history; we track raw conversation separately)
-            if response_text:
-                conversation.append({"role": "assistant", "content": response_text})
-
-            # Emit tool events from this turn
-            for tool_name, t_args, result, is_error in _extract_tool_events(updated):
-                display.tool_call("interactive", tool_name, t_args, result, error=is_error)
-
-            # 4. Store response in memory
-            if response_text:
-                resp_importance = llm_client.score_importance(response_text)
-                memory.add(response_text, kind="observation", importance=resp_importance)
-
-            # 5. Maybe reflect
-            reflections = maybe_reflect(memory, llm_client, threshold=reflection_threshold)
-            if reflections:
-                for r in reflections:
-                    display.command_output(f"  [reflection] {r}")
-
-            # 6. Display response
-            display.agent_response(response_text or "(no response)")
 
             # Persist conversation to session store
             store.save("interactive_agent", conversation)
