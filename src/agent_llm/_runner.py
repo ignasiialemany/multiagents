@@ -143,6 +143,24 @@ Path resolution (--agents-registry / --tools-registry / --sessions-dir):
         help="Start in interactive REPL mode (generative agent).",
     )
     p.add_argument(
+        "--meeting",
+        default=None,
+        metavar="TOPIC",
+        help="Run a single meeting with the given topic and exit (no REPL). Uses architect, coder, reviewer if present.",
+    )
+    p.add_argument(
+        "--meeting-phase",
+        default=None,
+        metavar="PHASES",
+        help="Comma-separated phases for --meeting (e.g. divergent,convergent,critical). Optional.",
+    )
+    p.add_argument(
+        "--meeting-boundary",
+        default=None,
+        metavar="AGENTS",
+        help="Phase-boundary agents for --meeting (e.g. synthesis_agent:convergent,devil_advocate:critical). Optional.",
+    )
+    p.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -315,7 +333,17 @@ def _setup_infrastructure(args: argparse.Namespace, display: RunDisplay):
         display.error(f"No agents configured. Checked: {agents_registry_path}")
         sys.exit(1)
 
-    llm_client = OpenRouterLLMClient(api_key=api_key, model=args.model)
+    # Per-agent model: registry entry may have optional "model" (OpenRouter model id).
+    # Cache one LLM client per model; default is args.model.
+    _llm_clients: dict[str, OpenRouterLLMClient] = {}
+
+    def get_llm_client(model: str | None = None) -> OpenRouterLLMClient:
+        m = model or args.model
+        if m not in _llm_clients:
+            _llm_clients[m] = OpenRouterLLMClient(api_key=api_key, model=m)
+        return _llm_clients[m]
+
+    llm_client = get_llm_client(args.model)
 
     agent_tools: dict[str, dict] = {}
     agents: dict[str, Agent] = {}
@@ -346,8 +374,11 @@ def _setup_infrastructure(args: argparse.Namespace, display: RunDisplay):
         )
         agent_tools["tool_designer"][assign_tool["name"]] = assign_tool
 
-    for a_id, tools in agent_tools.items():
-        agents[a_id] = Agent(llm_client, tools, agent_id=a_id)
+    for agent_info in agent_registry:
+        a_id = agent_info["agent_id"]
+        tools = agent_tools[a_id]
+        agent_model = agent_info.get("model") or args.model
+        agents[a_id] = Agent(get_llm_client(agent_model), tools, agent_id=a_id)
 
     return {
         "work_dir": work_dir,
@@ -358,6 +389,7 @@ def _setup_infrastructure(args: argparse.Namespace, display: RunDisplay):
         "agents": agents,
         "agent_tools": agent_tools,
         "llm_client": llm_client,
+        "get_llm_client": get_llm_client,
         "api_key": api_key,
         "default_tools": default_tools,
         "custom_tools": custom_tools,
@@ -773,6 +805,13 @@ def run_meeting(
     display: RunDisplay,
     max_rounds: int = 4,
     meeting_dir: Path | None = None,
+    meeting_goal: str | None = None,
+    brief: str | None = None,
+    phase_plan: list[str] | None = None,
+    get_llm_client=None,
+    meeting_series_id: str | None = None,
+    phase_boundary_agents: list[dict] | None = None,
+    agents: dict | None = None,
 ) -> str:
     """
     Run a meeting: each subagent prepares 1-2 questions/points (persona + topic),
@@ -790,29 +829,78 @@ def run_meeting(
 
     display.meeting_start(topic, agent_ids)
 
+    # ── Memory persistence: Load previous meeting in series ──
+    memory_injection = ""
+    if meeting_series_id and meeting_dir:
+        series_file = Path(meeting_dir) / f"series_{meeting_series_id}.json"
+        if series_file.exists():
+            try:
+                import json
+                last_meeting = json.loads(series_file.read_text(encoding="utf-8"))
+                memory_injection = f"\nPrevious meeting (series: {meeting_series_id}):\n"
+                memory_injection += f"- Summary: {last_meeting.get('summary', '(none)')}\n"
+                memory_injection += f"- Action items: {last_meeting.get('action_items', '(none)')}\n"
+            except Exception as e:
+                memory_injection = f"\n(Failed to load previous meeting context: {e})\n"
+                
+    # ── Build shared context ──
+    participants_str = "\n".join(f"- {a_id}: {id_to_desc[a_id]}" for a_id in agent_ids)
+    
+    shared_context = f"Meeting topic: {topic}\n"
+    if meeting_goal:
+        shared_context += f"Meeting goal: {meeting_goal}\n"
+    if memory_injection:
+        shared_context += f"{memory_injection}\n"
+    shared_context += f"\nParticipants:\n{participants_str}\n"
+    if brief:
+        shared_context += f"\nBrief / pre-read:\n{brief}\n"
+
     # ── Preparation: each agent reads persona and prepares 1-2 questions/points ──
     prep_block = "Pre-meeting preparation (each participant's questions/points):\n\n"
     for agent_id in agent_ids:
         desc = id_to_desc.get(agent_id, "")
         system = (
             f"You are {agent_id}. Your role: {desc}\n\n"
-            "You are preparing for a meeting. You have read the topic and your role. "
-            "Prepare 1-2 questions or discussion points you want to raise in the meeting. "
+            f"{shared_context}\n"
+            "You are preparing for a meeting. You know who is in the meeting and their roles. "
+            "Prepare 1-2 questions or points you want to raise, including who you're addressing if relevant. "
             "These can be clarified by other participants during the discussion."
         )
         user_content = (
-            f"Meeting topic: {topic}\n\n"
             "List 1-2 questions or points you want to bring (one short paragraph or bullet points)."
         )
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_content},
-        ]
-        try:
-            content, _ = llm_client.complete(messages, tools=None)
-        except Exception as exc:
-            content = f"(prep error: {exc})"
-        content = (content or "").strip()
+        
+        # If we have an Agent instance, it can use tools. Otherwise fallback to tools=None
+        if agents and agent_id in agents:
+            system += " You may use your tools to look up facts or run code if it helps your preparation."
+            messages = [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_content},
+            ]
+            try:
+                final_text, updated_messages = agents[agent_id].run(messages)
+                content = (final_text or "").strip()
+                # Extract and display any tool calls made during prep
+                for tool_name, args_dict, result, is_error in _extract_tool_events(updated_messages):
+                    display.tool_call(agent_id, tool_name, args_dict, result, error=is_error)
+            except Exception as exc:
+                content = f"(prep error: {exc})"
+        else:
+            messages = [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_content},
+            ]
+            # Look up this agent's model client, default to runner's default if not specified
+            agent_model = next((a.get("model") for a in agent_registry if a["agent_id"] == agent_id), None)
+            get_client_fn = get_llm_client or getattr(llm_client, "get_client", lambda m: llm_client)
+            client_for_agent = get_client_fn(agent_model)
+            
+            try:
+                content, _ = client_for_agent.complete(messages, tools=None)
+            except Exception as exc:
+                content = f"(prep error: {exc})"
+            content = (content or "").strip()
+            
         prep_block += f"[{agent_id}]: {content}\n\n"
         display.meeting_prep(agent_id, content)
 
@@ -820,44 +908,146 @@ def run_meeting(
 
     # ── Discussion: round-table; agents can ask new questions and answer others ──
     for r in range(max_rounds):
+        phase_instruction = ""
+        if phase_plan and r < len(phase_plan):
+            phase = phase_plan[r]
+            phase_instruction = f"Current phase: {phase}. "
+            if phase.lower() == "divergent":
+                phase_instruction += "Generate ideas; do not criticize."
+            elif phase.lower() == "convergent":
+                phase_instruction += "Narrow down options."
+            elif phase.lower() == "critical":
+                phase_instruction += "Challenge assumptions; stress-test."
+            else:
+                phase_instruction += "Address the current phase of the meeting."
+
         for agent_id in agent_ids:
             desc = id_to_desc.get(agent_id, "")
+            
+            # ── "Answer this" targeting ──
+            # Look at the most recent turns to see if someone asked this agent a direct question
+            targeted_prompt = ""
+            if len(transcript) > 100:
+                # Find the last turn by looking for the last [agent_id]:
+                import re
+                recent_turns = list(re.finditer(r"\[([a-zA-Z0-9_]+)\]: (.*?)(?=\n\[|$)", transcript, re.DOTALL))
+                if recent_turns:
+                    # Look at the last 2-3 turns for mentions of this agent_id or their role
+                    for turn in recent_turns[-3:]:
+                        speaker, text = turn.groups()
+                        if speaker != agent_id and (agent_id.lower() in text.lower() or "what do you think" in text.lower() or "?" in text):
+                            # It's not a perfect regex, but a good heuristic to grab questions
+                            questions = [q.strip() + "?" for q in text.split("?") if agent_id.lower() in q.lower() or "what" in q.lower() or "how" in q.lower()]
+                            if questions and len(questions[0]) > 10:
+                                targeted_prompt = f"Note: In the recent discussion, someone may have asked you this: \"{questions[0]}\". Please address it if relevant.\n\n"
+                                break
+
             system = (
                 f"You are {agent_id}. {desc}\n\n"
+                f"{shared_context}\n"
                 "You are in a meeting. You see the preparation and discussion so far. "
                 "You may: ask new questions for others to answer, answer questions others raised, "
-                "or add your view. Reply in 1-2 short paragraphs. Do not use tools; just speak."
+                "or add your view."
             )
+            if phase_instruction:
+                system += f"\n\n{phase_instruction}"
+
             user_content = (
-                f"Meeting topic: {topic}\n\n"
                 f"Preparation and discussion so far:\n\n{transcript}\n\n"
-                "What do you want to say? (e.g. a question for the group or an answer to someone's question.)"
+                f"{targeted_prompt}"
+                "What do you want to say? (e.g. a question for the group or an answer to someone's question.) "
+                "If someone asked you a direct question, address it in your reply."
             )
-            messages = [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user_content},
-            ]
-            try:
-                content, _ = llm_client.complete(messages, tools=None)
-            except Exception as exc:
-                content = f"(error: {exc})"
-            content = (content or "").strip()
+            
+            # If we have an Agent instance, it can use tools. Otherwise fallback to tools=None
+            if agents and agent_id in agents:
+                system += " You may use your tools (e.g. read files, run code) if it helps you answer; then give your reply in 1-2 short paragraphs."
+                messages = [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_content},
+                ]
+                try:
+                    final_text, updated_messages = agents[agent_id].run(messages)
+                    content = (final_text or "").strip()
+                    # Extract and display any tool calls made during discussion
+                    for tool_name, args_dict, result, is_error in _extract_tool_events(updated_messages):
+                        display.tool_call(agent_id, tool_name, args_dict, result, error=is_error)
+                except Exception as exc:
+                    content = f"(error: {exc})"
+            else:
+                system += " Reply in 1-2 short paragraphs. Do not use tools; just speak."
+                messages = [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_content},
+                ]
+                
+                agent_model = next((a.get("model") for a in agent_registry if a["agent_id"] == agent_id), None)
+                get_client_fn = get_llm_client or getattr(llm_client, "get_client", lambda m: llm_client)
+                client_for_agent = get_client_fn(agent_model)
+                
+                try:
+                    content, _ = client_for_agent.complete(messages, tools=None)
+                except Exception as exc:
+                    content = f"(error: {exc})"
+                content = (content or "").strip()
+                
             transcript += f"[{agent_id}]: {content}\n\n"
             display.meeting_turn(agent_id, content)
+
+        # ── Role-based phase-boundary agents ──
+        if phase_plan and r < len(phase_plan) and phase_boundary_agents:
+            current_phase = phase_plan[r].lower()
+            for boundary_agent in phase_boundary_agents:
+                b_id = boundary_agent.get("agent_id")
+                after_phase = boundary_agent.get("after_phase", "").lower()
+                b_desc = boundary_agent.get("description", "A special phase-boundary agent.")
+                b_model = boundary_agent.get("model")
+                b_prompt = boundary_agent.get("prompt", "Analyze the transcript and provide a short summary or critique.")
+                
+                if after_phase == current_phase:
+                    b_system = (
+                        f"You are {b_id}. {b_desc}\n\n"
+                        f"{shared_context}\n"
+                        f"{b_prompt}\n"
+                        "Reply in 1 short paragraph. Do not use tools; just speak."
+                    )
+                    b_user = f"Preparation and discussion so far:\n\n{transcript}\n\nPlease speak now."
+                    b_msgs = [
+                        {"role": "system", "content": b_system},
+                        {"role": "user", "content": b_user},
+                    ]
+                    
+                    b_client = get_client_fn(b_model)
+                    try:
+                        b_content, _ = b_client.complete(b_msgs, tools=None)
+                    except Exception as exc:
+                        b_content = f"(error: {exc})"
+                    b_content = (b_content or "").strip()
+                    transcript += f"[{b_id}]: {b_content}\n\n"
+                    display.meeting_turn(b_id, b_content)
 
     # ── Create plan from the meeting ──
     plan_messages = [
         {
             "role": "user",
             "content": (
-                "Based on this meeting (preparation and discussion), produce a clear plan. "
-                "Include: (1) agreed decisions or conclusions, (2) concrete next steps or action items, "
-                "(3) any open questions that still need to be answered. Use bullet points or numbered list.\n\n"
-                f"Meeting:\n{transcript}"
+                "Based on the meeting transcript below, produce a structured synthesis of the discussion.\n"
+                "You MUST format your output exactly with these markdown headings:\n\n"
+                "## Summary\n"
+                "(A concise 1-paragraph summary of what was discussed)\n\n"
+                "## Decisions\n"
+                "(A bulleted list of agreed decisions or conclusions)\n\n"
+                "## Action items\n"
+                "(A bulleted list of action items, each specifying an owner and description)\n\n"
+                "## Open questions\n"
+                "(A bulleted list of any remaining unresolved questions)\n\n"
+                f"Transcript:\n{transcript}"
             ),
         },
     ]
     try:
+        # Default to the most capable model or the generic runner one.
+        # Use the interactive_llm_client or the standard client.
         plan, _ = llm_client.complete(plan_messages, tools=None)
         plan = (plan or "").strip()
     except Exception as exc:
@@ -879,6 +1069,32 @@ def run_meeting(
             display.command_output(f"Meeting saved to {filepath}")
         except OSError as exc:
             display.command_output(f"Could not save meeting file: {exc}")
+            
+        # Memory persistence: Save latest summary to series file
+        if meeting_series_id:
+            series_file = meeting_dir / f"series_{meeting_series_id}.json"
+            try:
+                import json
+                import re
+                
+                # Try to extract the sections
+                summary_match = re.search(r"## Summary\n(.*?)(?=\n##|$)", plan, re.DOTALL)
+                action_items_match = re.search(r"## Action items\n(.*?)(?=\n##|$)", plan, re.DOTALL)
+                
+                summary = summary_match.group(1).strip() if summary_match else "(No summary extracted)"
+                action_items = action_items_match.group(1).strip() if action_items_match else "(No action items extracted)"
+                
+                series_data = {
+                    "last_meeting_topic": topic,
+                    "last_meeting_file": str(filepath.name),
+                    "summary": summary,
+                    "action_items": action_items,
+                    "timestamp": timestamp
+                }
+                series_file.write_text(json.dumps(series_data, indent=2), encoding="utf-8")
+                display.command_output(f"Meeting series memory saved to {series_file}")
+            except Exception as exc:
+                display.command_output(f"Could not save meeting series memory: {exc}")
 
     return full_output
 
@@ -897,7 +1113,12 @@ def _make_create_agent_tool(
     """
     import re
 
-    def create_agent(agent_id: str, description: str, persist: bool = True) -> str:
+    def create_agent(
+        agent_id: str,
+        description: str,
+        persist: bool = True,
+        model: str | None = None,
+    ) -> str:
         if not re.match(r"^[a-zA-Z][a-zA-Z0-9_]*$", agent_id):
             return (
                 f"Error: agent_id '{agent_id}' is invalid. "
@@ -924,9 +1145,14 @@ def _make_create_agent_tool(
         new_tools[delegate_tool["name"]] = delegate_tool
 
         new_entry: dict = {"agent_id": agent_id, "description": description}
+        if model:
+            new_entry["model"] = model
         agent_registry.append(new_entry)
         agent_tools[agent_id] = new_tools
-        agents[agent_id] = Agent(infra["llm_client"], new_tools, agent_id=agent_id)
+        get_client = infra.get("get_llm_client") or (lambda m=None: infra["llm_client"])
+        agents[agent_id] = Agent(
+            get_client(model), new_tools, agent_id=agent_id
+        )
 
         if persist:
             save_agent_registry(agent_registry, agents_registry_path)
@@ -958,6 +1184,10 @@ def _make_create_agent_tool(
                 "persist": {
                     "type": "boolean",
                     "description": "Whether to save the new agent to the agents registry file (default: true).",
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional OpenRouter model id for this agent (e.g. anthropic/claude-sonnet-4). If omitted, uses the default runner model.",
                 },
             },
             "required": ["agent_id", "description"],
@@ -1003,7 +1233,12 @@ def _run_interactive(args: argparse.Namespace, display: RunDisplay) -> None:
     interactive_tools[spawn_tool["name"]] = spawn_tool
     meeting_dir = Path(sessions_dir) / "meetings"
     meeting_tool = create_meeting_tool(
-        agent_registry, llm_client, display, run_meeting, meeting_dir=meeting_dir
+        agent_registry, 
+        llm_client, 
+        display, 
+        lambda *args, **kwargs: run_meeting(*args, get_llm_client=infra.get("get_llm_client"), agents=infra.get("agents"), **kwargs), 
+        meeting_dir=meeting_dir, 
+        workspace=infra.get("redis_workspace")
     )
     interactive_tools[meeting_tool["name"]] = meeting_tool
     interactive_tools[infra["sandbox_tool"]["name"]] = infra["sandbox_tool"]
@@ -1139,6 +1374,43 @@ def main() -> None:
         quiet=args.quiet,
         transcript_path=transcript_path,
     ) as display:
+        meeting_topic = getattr(args, "meeting", None)
+        if meeting_topic:
+            infra = _setup_infrastructure(args, display)
+            sessions_dir = infra["sessions_dir"]
+            meeting_dir = Path(sessions_dir) / "meetings"
+            agent_registry = infra["agent_registry"]
+            # Prefer architect, coder, reviewer; else first 3 non–meeting_only
+            preferred = ["architect", "coder", "reviewer"]
+            all_ids = [
+                a["agent_id"]
+                for a in agent_registry
+                if a.get("meeting_only") is not True
+            ]
+            chosen = [aid for aid in preferred if aid in all_ids]
+            if len(chosen) < 3:
+                for aid in all_ids:
+                    if aid not in chosen:
+                        chosen.append(aid)
+                        if len(chosen) >= 3:
+                            break
+            if not chosen:
+                display.error("No agents available for the meeting.")
+                sys.exit(1)
+            run_meeting(
+                topic=meeting_topic,
+                agent_ids=chosen,
+                agent_registry=agent_registry,
+                llm_client=infra["llm_client"],
+                display=display,
+                meeting_dir=meeting_dir,
+                get_llm_client=infra["get_llm_client"],
+                agents=infra.get("agents"),
+            )
+            display.command_output(
+                f"Meeting finished. Output saved under {meeting_dir}."
+            )
+            return
         if is_interactive:
             _run_interactive(args, display)
         else:

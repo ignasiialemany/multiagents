@@ -335,6 +335,7 @@ def create_meeting_tool(
     display,
     run_meeting_fn,
     meeting_dir=None,
+    workspace=None,
 ) -> Tool:
     """
     Create a tool that runs a meeting: subagents prepare, discuss, and produce a plan.
@@ -347,8 +348,10 @@ def create_meeting_tool(
     display : RunDisplay (for run_meeting_fn)
     run_meeting_fn : callable(..., meeting_dir=...) -> str
     meeting_dir : optional path to save meeting files
+    workspace : optional Workspace object to read brief from
     """
     from pathlib import Path
+    import json
 
     agent_desc = "\n".join(
         f"- {a['agent_id']}: {a['description']}" for a in agent_registry
@@ -359,6 +362,12 @@ def create_meeting_tool(
         topic: str,
         agent_ids: str,
         max_rounds: int = 4,
+        meeting_goal: str | None = None,
+        brief: str | None = None,
+        phase_plan: str | None = None,
+        brief_workspace_key: str | None = None,
+        meeting_series_id: str | None = None,
+        phase_boundary_agents: str | None = None,
     ) -> str:
         # Compute live so newly created agents are always recognised.
         known = [a["agent_id"] for a in agent_registry]
@@ -366,9 +375,50 @@ def create_meeting_tool(
         for a_id in ids:
             if a_id not in known:
                 return f"Error: unknown agent '{a_id}'. Available: {', '.join(known)}"
+                
+        # Resolve brief from workspace if requested
+        resolved_brief = brief
+        if brief_workspace_key and workspace is not None:
+            try:
+                # If workspace is a RedisWorkspace it has read_all returning json string or we can use internal _load (might be different implementation)
+                # Let's try to get it properly, assuming workspace has read_all or similar
+                # Let's read the workspace json
+                ws_data = json.loads(workspace.read_all())
+                if brief_workspace_key in ws_data:
+                    resolved_brief = str(ws_data[brief_workspace_key])
+                elif not resolved_brief:
+                    resolved_brief = f"(Brief key '{brief_workspace_key}' not found in workspace)"
+            except Exception as e:
+                if not resolved_brief:
+                    resolved_brief = f"(Error reading brief from workspace: {e})"
+                    
+        # Parse phase_plan string to list if provided
+        parsed_phase_plan = None
+        if phase_plan:
+            parsed_phase_plan = [p.strip() for p in phase_plan.split(",") if p.strip()]
+            
+        # Parse phase_boundary_agents string to list of dicts if provided
+        # Format expected: "synthesis_agent:convergent,devil_advocate:critical"
+        parsed_boundary_agents = None
+        if phase_boundary_agents:
+            parsed_boundary_agents = []
+            parts = [p.strip() for p in phase_boundary_agents.split(",") if p.strip()]
+            for part in parts:
+                if ":" in part:
+                    b_id, b_phase = part.split(":", 1)
+                    parsed_boundary_agents.append({
+                        "agent_id": b_id.strip(),
+                        "after_phase": b_phase.strip()
+                    })
+
         return run_meeting_fn(
             topic, ids, agent_registry, llm_client, display, max_rounds,
             meeting_dir=_meeting_dir,
+            meeting_goal=meeting_goal,
+            brief=resolved_brief,
+            phase_plan=parsed_phase_plan,
+            meeting_series_id=meeting_series_id,
+            phase_boundary_agents=parsed_boundary_agents,
         )
 
     return _tool(
@@ -393,6 +443,30 @@ def create_meeting_tool(
                 "max_rounds": {
                     "type": "integer",
                     "description": "Number of discussion rounds (default 4).",
+                },
+                "meeting_goal": {
+                    "type": "string",
+                    "description": "Optional explicit goal for the meeting (e.g. 'Align on architecture').",
+                },
+                "brief": {
+                    "type": "string",
+                    "description": "Optional short shared text everyone sees before the meeting.",
+                },
+                "phase_plan": {
+                    "type": "string",
+                    "description": "Optional comma-separated list of phases for the rounds (e.g. 'divergent,convergent,critical').",
+                },
+                "brief_workspace_key": {
+                    "type": "string",
+                    "description": "Optional workspace key to read the brief from.",
+                },
+                "meeting_series_id": {
+                    "type": "string",
+                    "description": "Optional recurring series ID (e.g. 'weekly_planning'). If provided, the meeting will load context from the last meeting in this series and save its own outcomes to be carried forward.",
+                },
+                "phase_boundary_agents": {
+                    "type": "string",
+                    "description": "Optional comma-separated list of agent_id:phase pairs (e.g. 'synthesis_agent:convergent,devil_advocate:critical'). These agents will speak once at the end of the specified phase.",
                 },
             },
             "required": ["topic", "agent_ids"],

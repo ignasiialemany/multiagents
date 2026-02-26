@@ -29,6 +29,9 @@ Each agent in the multi-agent run gets the **same** combined tool set:
 
 So: **default + registry + workspace + send_message** are all active in `run_multi_agent.py`.
 
+**Agent registry and per-agent model:**  
+The agents registry (e.g. `agents/registry.json`) lists each agent with `agent_id`, `description`, and `inbox_id`. Each entry can optionally include **`model`** — an OpenRouter model id (e.g. `anthropic/claude-sonnet-4`). If set, that agent uses that model; otherwise it uses the runner default (`--model`). The runner caches one LLM client per model, so multiple agents can share the same model without duplicate clients.
+
 **Adding new tools:**  
 Implement the function in `src/agent_llm/tools_custom.py` and add the entry to `tools/registry.json`. The `run_multi_agent.py` runner calls `load_registry_tools(tools/registry.json)`, so any registered tool is available to **all** agents in the multi-agent run.
 
@@ -73,6 +76,19 @@ Implement the function in `src/agent_llm/tools_custom.py` and add the entry to `
 **So:** The workspace is **shared, visible state** that agents use to coordinate and build together. Unlike the bus, it is not "who said what to whom" but "what is the current shared context/artifacts." Unlike sessions, it is not private; every agent with workspace tools sees the same data.
 
 **In code:** `workspace = Workspace(redis_client)`; `create_workspace_tools(workspace)` gives each agent the same tools backed by that one `Workspace` instance.
+
+---
+
+## 4. Meetings (`create_meeting_tool`)
+
+**What it is:** A structured workflow for subagents to discuss a topic and produce a consensus plan.
+**How it works:** 
+- It sets up a **shared context** (topic, optional goal, participant list + roles, optional brief from the workspace).
+- Agents go through a **preparation phase** to generate discussion points.
+- A multi-round **discussion phase** occurs where agents converse (optionally guided by specific phases like "divergent", "convergent", "critical").
+- **Tools in meetings**: When the runner has `Agent` instances for the participants, agents can use tools and execute code during both prep and discussion rounds to aid their replies.
+- Finally, the discussion is synthesized into a robust plan.
+This gives agents strong *prior context* so they know exactly who they are talking to and what they are trying to achieve before the meeting begins.
 
 ---
 
